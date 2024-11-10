@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simulación de Movimiento con Autocompletado y Google Maps</title>
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <!-- Cargar la API de Google Maps -->
+    <script async src="https://maps.googleapis.com/maps/api/js?key=apiKey&callback=initMap"></script>
+    <style>
+        #map {
+            height: 500px;
+            width: 100%;
+        }
+        .autocomplete-container {
+            position: relative;
+            width: 300px;
+            margin-bottom: 20px;
+        }
+        .suggestions {
+            position: absolute;
+            width: 100%;
+            border: 1px solid #ccc;
+            border-top: none;
+            max-height: 200px;
+            overflow-y: auto;
+            background-color: #fff;
+            display: none;
+            z-index: 1000;
+        }
+        .suggestion-item {
+            padding: 8px;
+            cursor: pointer;
+            border-bottom: 1px solid #eee;
+        }
+        .suggestion-item:hover {
+            background-color: #f0f0f0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Simulación de Movimiento de Vehículo</h1>
+    
+    <div class="autocomplete-container">
+        <label for="origin">Punto de Partida:</label>
+        <input type="text" id="origin" placeholder="Escribe una ubicación..." oninput="fetchSuggestions('origin')" />
+        <div id="suggestions-origin" class="suggestions"></div>
+    </div>
+
+    <div class="autocomplete-container">
+        <label for="destination">Destino:</label>
+        <input type="text" id="destination" placeholder="Escribe una ubicación..." oninput="fetchSuggestions('destination')" />
+        <div id="suggestions-destination" class="suggestions"></div>
+    </div>
+
+    <button onclick="startSimulation()">Iniciar Simulación</button>
+    
+    <div id="map"></div>
+
+    <script>
+        let map, vehicleMarker, destinationMarker, routePath;
+        let route = [];
+        let currentIndex = 0;
+        let intervalId;
+        const socket = io('http://localhost:3000'); // Cambia la URL si es necesario
+
+        // Inicializar el mapa
+        function initMap() {
+            const initialPosition = { lat: -12.04318, lng: -77.02824 }; // Ejemplo en Lima, Perú
+
+            map = new google.maps.Map(document.getElementById("map"), {
+                zoom: 14,
+                center: initialPosition,
+            });
+        }
+
+        // Función para obtener sugerencias de autocompletado
+        async function fetchSuggestions(inputType) {
+            const query = document.getElementById(inputType).value;
+            const suggestionsContainer = document.getElementById(`suggestions-${inputType}`);
+
+            if (query.trim() === '') {
+                suggestionsContainer.style.display = 'none';
+                return;
+            }
+
+            try {
+                const response = await fetch(`http://localhost:3000/google-maps/search?query=${encodeURIComponent(query)}`);
+                const data = await response.json();
+
+                suggestionsContainer.innerHTML = '';
+                if (data && data.results && data.results.length > 0) {
+                    data.results.forEach(result => {
+                        const suggestionItem = document.createElement('div');
+                        suggestionItem.className = 'suggestion-item';
+                        suggestionItem.textContent = result.name;
+                        suggestionItem.onclick = () => selectSuggestion(inputType, result.name);
+                        suggestionsContainer.appendChild(suggestionItem);
+                    });
+                    suggestionsContainer.style.display = 'block';
+                } else {
+                    suggestionsContainer.style.display = 'none';
+                }
+            } catch (error) {
+                console.error("Error al obtener sugerencias:", error);
+                suggestionsContainer.style.display = 'none';
+            }
+        }
+
+        // Seleccionar una sugerencia y rellenar el campo de entrada
+        function selectSuggestion(inputType, name) {
+            document.getElementById(inputType).value = name;
+            document.getElementById(`suggestions-${inputType}`).style.display = 'none';
+        }
+
+        // Iniciar la simulación de movimiento calculando la ruta y enviando coordenadas al backend
+        async function startSimulation() {
+            const origin = document.getElementById('origin').value;
+            const destination = document.getElementById('destination').value;
+
+            if (!origin || !destination) {
+                alert("Por favor, ingrese un punto de partida y un destino.");
+                return;
+            }
+
+            // Obtener la ruta entre origen y destino usando la API de Google Maps
+            const directionsService = new google.maps.DirectionsService();
+            const directionsRequest = {
+                origin: origin,
+                destination: destination,
+                travelMode: google.maps.TravelMode.DRIVING,
+            };
+
+            directionsService.route(directionsRequest, (result, status) => {
+                if (status === google.maps.DirectionsStatus.OK) {
+                    route = result.routes[0].overview_path;
+                    renderRouteOnMap(route);
+                    setMarkers(route);
+                    currentIndex = 0;
+                    emitVehiclePosition();
+                } else {
+                    alert("No se pudo obtener la ruta: " + status);
+                }
+            });
+        }
+
+        // Renderizar la ruta en el mapa
+        function renderRouteOnMap(route) {
+            if (routePath) routePath.setMap(null); // Elimina la ruta anterior si existe
+
+            routePath = new google.maps.Polyline({
+                path: route,
+                geodesic: true,
+                strokeColor: "#FF0000",
+                strokeOpacity: 0.8,
+                strokeWeight: 4,
+                map: map,
+            });
+
+            map.fitBounds(new google.maps.LatLngBounds(route[0], route[route.length - 1]));
+            map.zoom = 14;
+        }
+
+        // Establecer marcadores en el mapa para el vehículo y el destino
+        function setMarkers(route) {
+            // Coloca el marcador de la posición inicial del vehículo
+            if (vehicleMarker) vehicleMarker.setMap(null); // Elimina marcador anterior
+            vehicleMarker = new google.maps.Marker({
+                position: route[0],
+                map: map,
+                title: "Ubicación del Vehículo",
+                icon: "http://maps.google.com/mapfiles/ms/icons/blue-dot.png"
+            });
+
+            // Coloca el marcador del destino
+            if (destinationMarker) destinationMarker.setMap(null); // Elimina marcador anterior
+            destinationMarker = new google.maps.Marker({
+                position: route[route.length - 1],
+                map: map,
+                title: "Destino",
+                icon: "http://maps.google.com/mapfiles/ms/icons/red-dot.png"
+            });
+        }
+
+        // Emitir la posición del vehículo al backend
+        function emitVehiclePosition() {
+            if (intervalId) clearInterval(intervalId);
+
+            intervalId = setInterval(() => {
+                if (currentIndex < route.length) {
+                    const position = route[currentIndex];
+                    // Enviar la posición actual al backend
+                    socket.emit('updateLocation', { vehicleId: '12345', lat: position.lat(), lng: position.lng() });
+                    currentIndex++;
+                } else {
+                    clearInterval(intervalId);
+                    console.log("Simulación completada.");
+                }
+            }, 1000); // Ajusta el intervalo para la velocidad de movimiento
+        }
+
+        // Escuchar las actualizaciones de posición desde el backend
+        socket.on('location-12345', (data) => {
+            const { lat, lng } = data;
+
+            // Actualizar la posición del marcador del vehículo solo al recibir los datos del backend
+            if (!vehicleMarker) {
+                vehicleMarker = new google.maps.Marker({
+                    position: { lat, lng },
+                    map: map,
+                    title: "Ubicación del Vehículo",
+                    icon: "http://maps.google.com/mapfiles/ms/icons/blue-dot.png"
+                });
+            } else {
+                vehicleMarker.setPosition({ lat, lng });
+            }
+
+            // Centrar el mapa en la posición del vehículo
+            map.panTo({ lat, lng });
+        });
+    </script>
+</body>
+</html>
